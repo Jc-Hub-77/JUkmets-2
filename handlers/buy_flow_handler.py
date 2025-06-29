@@ -460,6 +460,17 @@ def handle_size_selection_callback(bot_instance, clear_user_state, get_user_stat
     update_user_state(user_id, 'buy_amount_due_eur', float(amount_to_pay_externally))
     update_user_state(user_id, 'buy_paid_from_balance', float(paid_from_balance))
     update_user_state(user_id, 'buy_total_cost_eur', float(total_cost))
+
+    # Clear any previous transaction context if user is re-selecting payment method for the same item
+    previous_tx_id = get_user_state(user_id, 'buy_transaction_id')
+    if previous_tx_id:
+        # Construct the key for invoice details based on the old transaction ID and clear it
+        old_invoice_details_key = f'buy_invoice_details_{previous_tx_id}'
+        if get_user_state(user_id, old_invoice_details_key): # Check if it exists before trying to clear
+             update_user_state(user_id, old_invoice_details_key, None)
+        update_user_state(user_id, 'buy_transaction_id', None)
+        logger.info(f"User {user_id} returning to payment selection. Cleared prior tx_id {previous_tx_id} and its invoice details from user_state.")
+
     update_user_state(user_id, 'current_flow', 'buy_awaiting_payment_method')
 
     # Retrieve stored item details from user_state
@@ -784,9 +795,9 @@ def handle_pay_buy_crypto_callback(bot_instance, clear_user_state, get_user_stat
     invoice_text = (
         f"Invoice for your purchase of *{item_name_display_escaped}*:\n\n"
         f"{price_info_text}\n\n"
-        f"Payment Method: *{display_coin_symbol_escaped}* ({network_for_db_escaped})\n"
-        f"Amount: `{expected_crypto_amount_str}` *{display_coin_symbol_escaped}*\n"
-        f"Address: `{unique_address_escaped}`\n\n"
+        f"Payment Method: *{display_coin_symbol_escaped}* ({network_for_db_escaped})\n\n"
+        f"Please send the exact amount:\n`{expected_crypto_amount_str}` {display_coin_symbol_escaped}\n\n"  # Amount made plain and copyable
+        f"To this address:\n`{unique_address_escaped}`\n\n"  # Address made plain and copyable
         f"{initial_countdown_text}"
         f"Expires At: *{expires_at_formatted_escaped}*\n\n"
         f"{final_sentence_escaped}"
@@ -1018,9 +1029,9 @@ def handle_buy_check_payment_callback(bot_instance, clear_user_state, get_user_s
                     f"{new_countdown_text}"
                     f"Invoice for your purchase of *{invoice_details['item_name_escaped']}*:\n\n"
                     f"{invoice_details['price_info_text']}\n\n"
-                    f"Payment Method: *{invoice_details['display_coin_symbol_escaped']}* ({invoice_details['network_for_db_escaped']})\n"
-                    f"Amount: `{invoice_details['expected_crypto_amount_str']}` *{invoice_details['display_coin_symbol_escaped']}*\n"
-                    f"Address: `{invoice_details['unique_address_escaped']}`\n\n"
+                    f"Payment Method: *{invoice_details['display_coin_symbol_escaped']}* ({invoice_details['network_for_db_escaped']})\n\n"
+                    f"Please send the exact amount:\n`{invoice_details['expected_crypto_amount_str']}` {invoice_details['display_coin_symbol_escaped']}\n\n"
+                    f"To this address:\n`{invoice_details['unique_address_escaped']}`\n\n"
                     f"Expires At: *{invoice_details['expires_at_formatted_escaped']}*\n\n" # Static original expiry time
                     f"{invoice_details['final_sentence_escaped']}"
                 ).strip()
