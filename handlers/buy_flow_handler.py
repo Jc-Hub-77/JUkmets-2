@@ -588,12 +588,14 @@ def handle_pay_buy_crypto_callback(bot_instance, clear_user_state, get_user_stat
     original_message_id = get_user_state(user_id, 'last_bot_message_id') or call.message.message_id
     ack_msg = None
 
+    logger.info(f"User {user_id} - Entering handle_pay_buy_crypto_callback. Callback data: {call.data}")
+
     try:
         crypto_currency = call.data.split('pay_buy_')[1]
         if crypto_currency.upper() not in ["USDT", "BTC", "LTC"]: raise IndexError("Invalid crypto")
-        logger.info(f"User {user_id} selected crypto {crypto_currency} for buying item.")
+        logger.info(f"User {user_id} - Parsed crypto_currency: {crypto_currency} for buying item.")
     except IndexError:
-        logger.warning(f"Invalid callback data for pay_buy: {call.data} by user {user_id}")
+        logger.warning(f"User {user_id} - Invalid callback data for pay_buy: {call.data}")
         bot_instance.answer_callback_query(call.id, "Error processing your selection.", show_alert=True)
         return
 
@@ -660,22 +662,30 @@ def handle_pay_buy_crypto_callback(bot_instance, clear_user_state, get_user_stat
         network_for_db = "TRC20 (Tron)"
         # display_coin_symbol remains "USDT"
 
+    logger.info(f"User {user_id} - Derived coin params: HDWalletSymbol='{coin_symbol_for_hd_wallet}', DisplaySymbol='{display_coin_symbol}', NetworkDB='{network_for_db}'")
+
     try:
+        logger.info(f"User {user_id} - Getting next address index for: {coin_symbol_for_hd_wallet}")
         next_idx = get_next_address_index(coin_symbol_for_hd_wallet)
+        logger.info(f"User {user_id} - Next address index: {next_idx}")
     except Exception as e_idx:
         logger.exception(f"HD Wallet: Error getting next address index for {coin_symbol_for_hd_wallet} (user {user_id}, tx {main_transaction_id}): {e_idx}")
         send_or_edit_message(bot_instance, chat_id, "Error generating payment address (index). Please try again later or contact support.", existing_message_id=current_message_id_for_invoice)
         update_transaction_status(main_transaction_id, 'error_address_generation')
         return
 
+    logger.info(f"User {user_id} - Generating address with symbol: {coin_symbol_for_hd_wallet}, index: {next_idx}")
     unique_address = hd_wallet_utils.generate_address(coin_symbol_for_hd_wallet, next_idx)
+    logger.info(f"User {user_id} - Generated address: {unique_address}")
     if not unique_address:
         logger.error(f"HD Wallet: Failed to generate address for {coin_symbol_for_hd_wallet}, index {next_idx} (user {user_id}, tx {main_transaction_id}).")
         send_or_edit_message(bot_instance, chat_id, "Error generating payment address (HD). Please try again later or contact support.", existing_message_id=current_message_id_for_invoice)
         update_transaction_status(main_transaction_id, 'error_address_generation')
         return
 
+    logger.info(f"User {user_id} - Getting exchange rate for EUR to {display_coin_symbol}")
     rate = exchange_rate_utils.get_current_exchange_rate("EUR", display_coin_symbol)
+    logger.info(f"User {user_id} - Exchange rate: {rate}")
     if not rate:
         logger.error(f"HD Wallet: Could not get exchange rate for EUR to {display_coin_symbol} (user {user_id}, tx {main_transaction_id}).")
         send_or_edit_message(bot_instance, chat_id, f"Could not retrieve exchange rate for {escape_md(display_coin_symbol)}. Please try again or contact support.", existing_message_id=current_message_id_for_invoice, parse_mode='MarkdownV2')
@@ -686,6 +696,7 @@ def handle_pay_buy_crypto_callback(bot_instance, clear_user_state, get_user_stat
     num_decimals = precision_map.get(display_coin_symbol, 8)
     amount_due_eur_decimal = Decimal(str(amount_due_eur_float))
     expected_crypto_amount_decimal_hr = (amount_due_eur_decimal / rate).quantize(Decimal('1e-' + str(num_decimals)), rounding=ROUND_UP)
+    logger.info(f"User {user_id} - Calculated expected_crypto_amount_decimal_hr: {expected_crypto_amount_decimal_hr} for {display_coin_symbol}")
     smallest_unit_multiplier = Decimal('1e-' + str(num_decimals))
     expected_crypto_amount_smallest_unit_str = str(int(expected_crypto_amount_decimal_hr * smallest_unit_multiplier))
 
@@ -722,11 +733,13 @@ def handle_pay_buy_crypto_callback(bot_instance, clear_user_state, get_user_stat
 
     qr_code_path = None
     try:
+        logger.info(f"User {user_id} - Generating QR code for address: {unique_address}, amount: {expected_crypto_amount_decimal_hr}, symbol: {display_coin_symbol}")
         qr_code_path = hd_wallet_utils.generate_qr_code_for_address(
            unique_address,
            str(expected_crypto_amount_decimal_hr),
            display_coin_symbol
         )
+        logger.info(f"User {user_id} - QR code path: {qr_code_path}")
     except Exception as e_qr_gen:
         logger.error(f"HD Wallet (buy): QR code generation failed for {unique_address} (user {user_id}, tx {main_transaction_id}): {e_qr_gen}")
 
@@ -736,13 +749,17 @@ def handle_pay_buy_crypto_callback(bot_instance, clear_user_state, get_user_stat
     expected_crypto_amount_str = f"{expected_crypto_amount_decimal_hr}" # Keep as Decimal string for display
 
     # Escape parts that are not numbers/addresses/already escaped strings
-    item_name_display_escaped = escape_md(item_name_display) # Use escape_md
-    display_coin_symbol_escaped = escape_md(display_coin_symbol) # Use escape_md
-    network_for_db_escaped = escape_md(network_for_db) # Use escape_md
-    unique_address_escaped = escape_md(unique_address) # Use escape_md
-    expires_at_formatted_escaped = escape_md(expires_at_dt.strftime('%Y-%m-%d %H:%M:%S UTC')) # Use escape_md
-    final_sentence_escaped = escape_md("Send the exact amount using the correct network. This address is for single use only.") # Use escape_md
+    item_name_display_escaped = escape_md(item_name_display)
+    display_coin_symbol_escaped = escape_md(display_coin_symbol)
+    network_for_db_escaped = escape_md(network_for_db)
+    # For unique_address, we want to log the raw address before escaping for display,
+    # but use the escaped version in the display text.
+    # The raw unique_address is used for the separate copyable message.
+    unique_address_escaped_for_display = escape_md(unique_address)
+    expires_at_formatted_escaped = escape_md(expires_at_dt.strftime('%Y-%m-%d %H:%M:%S UTC'))
+    final_sentence_escaped = escape_md("Send the exact amount using the correct network. This address is for single use only.")
 
+    logger.info(f"User {user_id} - Invoice text components: ItemName='{item_name_display_escaped}', DisplayCoinSymbol='{display_coin_symbol_escaped}', Network='{network_for_db_escaped}', CryptoAmountStr='{expected_crypto_amount_str}', UniqueAddressForDisplay='{unique_address_escaped_for_display}', RawUniqueAddress='{unique_address}'")
 
     price_info_parts = [
         f"Item: *{item_name_display_escaped}*",
@@ -768,15 +785,13 @@ def handle_pay_buy_crypto_callback(bot_instance, clear_user_state, get_user_stat
 
     now_for_countdown = datetime.datetime.now(datetime.timezone.utc)
     initial_time_remaining_td = expires_at_dt_aware - now_for_countdown
-    initial_countdown_text = ""
 
-    if initial_time_remaining_td.total_seconds() > 0:
+    if initial_time_remaining_td.total_seconds() > 60: # More than 1 minute
         initial_remaining_minutes = int(initial_time_remaining_td.total_seconds() / 60)
-        if initial_remaining_minutes > 0:
-            initial_countdown_text = f"Time remaining: *Approx. {initial_remaining_minutes} min.*\n"
-        else: # Less than a minute but positive
-            initial_countdown_text = f"Time remaining: *Less than a minute.*\n"
-    else: # Time has already passed or is zero
+        initial_countdown_text = f"Time remaining: *Approx. {initial_remaining_minutes} min.*\n"
+    elif initial_time_remaining_td.total_seconds() > 0: # Between 0 and 60 seconds
+        initial_countdown_text = f"Time remaining: *Less than a minute.*\n"
+    else: # 0 or negative (window passed)
         initial_countdown_text = f"Time remaining: *Window passed.*\n"
 
     # Store invoice components for reconstruction during updates
@@ -792,12 +807,14 @@ def handle_pay_buy_crypto_callback(bot_instance, clear_user_state, get_user_stat
     }
     update_user_state(user_id, f'buy_invoice_details_{main_transaction_id}', invoice_template_details)
 
-    invoice_text = (
+    # Main invoice text - amount and address are for display, actual copyable values sent separately.
+    invoice_text_display_only = (
         f"Invoice for your purchase of *{item_name_display_escaped}*:\n\n"
         f"{price_info_text}\n\n"
         f"Payment Method: *{display_coin_symbol_escaped}* ({network_for_db_escaped})\n\n"
-        f"Please send the exact amount:\n`{expected_crypto_amount_str}` {display_coin_symbol_escaped}\n\n"  # Amount made plain and copyable
-        f"To this address:\n`{unique_address_escaped}`\n\n"  # Address made plain and copyable
+        f"Amount: *{expected_crypto_amount_str} {display_coin_symbol_escaped}*\n"
+        f"Address: *{unique_address_escaped_for_display}*\n\n" # Use escaped version for display
+        f"_(Please copy the exact amount and address from the separate messages below.)_\n\n"
         f"{initial_countdown_text}"
         f"Expires At: *{expires_at_formatted_escaped}*\n\n"
         f"{final_sentence_escaped}"
@@ -806,54 +823,49 @@ def handle_pay_buy_crypto_callback(bot_instance, clear_user_state, get_user_stat
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(types.InlineKeyboardButton(f"✅ I have sent {display_coin_symbol}", callback_data=f"check_buy_payment_{main_transaction_id}"))
     markup.add(types.InlineKeyboardButton("❌ Cancel Payment", callback_data=f"cancel_buy_payment_{main_transaction_id}"))
-    # Back button should return to the payment method selection screen for this item
-    # The callback for payment method selection was `select_size_{size_name}`
     markup.add(types.InlineKeyboardButton("⬅️ Try Different Payment Method", callback_data=f"select_size_{selected_size}"))
 
-
-    sent_message_id_val = None
+    sent_invoice_message_id = None
     if qr_code_path and os.path.exists(qr_code_path):
         try:
             with open(qr_code_path, 'rb') as photo_file:
-                # Delete the "Generating address..." message before sending the invoice with QR
-                if current_message_id_for_invoice:
+                if current_message_id_for_invoice: # Delete "Generating address..." message
                     try: delete_message(bot_instance, chat_id, current_message_id_for_invoice)
                     except Exception as e_del: logger.warning(f"Could not delete 'Generating address...' message {current_message_id_for_invoice}: {e_del}")
 
-                sent_message = bot_instance.send_photo(
-                    chat_id,
-                    photo=photo_file,
-                    caption=invoice_text,
-                    reply_markup=markup,
-                    parse_mode="MarkdownV2"
+                sent_msg_obj = bot_instance.send_photo(
+                    chat_id, photo=photo_file, caption=invoice_text_display_only,
+                    reply_markup=markup, parse_mode="MarkdownV2"
                 )
-                sent_message_id_val = sent_message.message_id
+                sent_invoice_message_id = sent_msg_obj.message_id
         except Exception as e_photo:
             logger.error(f"Error sending QR code photo for user {user_id}, tx {main_transaction_id}: {e_photo}. Sending text invoice instead.")
-            # Fallback to sending text invoice if photo fails
-            sent_message = send_or_edit_message(
-                bot_instance, chat_id, invoice_text,
-                reply_markup=markup,
-                existing_message_id=current_message_id_for_invoice, # Try to edit the ack message
-                parse_mode="MarkdownV2"
+            sent_msg_obj = send_or_edit_message(
+                bot_instance, chat_id, invoice_text_display_only, reply_markup=markup,
+                existing_message_id=current_message_id_for_invoice, parse_mode="MarkdownV2"
             )
-            if sent_message: sent_message_id_val = sent_message.message_id
-    else:
+            if sent_msg_obj: sent_invoice_message_id = sent_msg_obj.message_id if isinstance(sent_msg_obj, types.Message) else sent_msg_obj
+
+    else: # No QR code, send text invoice
         logger.warning(f"QR code path invalid or file not found for user {user_id}, tx {main_transaction_id}. Sending text invoice.")
-        # Send text invoice if QR code generation failed
-        sent_message = send_or_edit_message(
-            bot_instance, chat_id, invoice_text,
-            reply_markup=markup,
-            existing_message_id=current_message_id_for_invoice, # Try to edit the ack message
-            parse_mode="MarkdownV2"
+        sent_msg_obj = send_or_edit_message(
+            bot_instance, chat_id, invoice_text_display_only, reply_markup=markup,
+            existing_message_id=current_message_id_for_invoice, parse_mode="MarkdownV2"
         )
-        if sent_message: sent_message_id_val = sent_message.message_id
+        if sent_msg_obj: sent_invoice_message_id = sent_msg_obj.message_id if isinstance(sent_msg_obj, types.Message) else sent_msg_obj
 
-    if sent_message_id_val:
-        update_user_state(user_id, 'last_bot_message_id', sent_message_id_val)
-        update_user_state(user_id, 'current_flow', f'buy_awaiting_payment_{main_transaction_id}') # Update flow state to await payment for this tx
+    # Send separate messages for copyable amount and address if main invoice was sent
+    if sent_invoice_message_id:
+        try:
+            # Send amount (plain text for easy copying)
+            bot_instance.send_message(chat_id, f"{expected_crypto_amount_str}", parse_mode=None)
+            # Send address (plain text for easy copying)
+            bot_instance.send_message(chat_id, f"{unique_address}", parse_mode=None) # Use raw unique_address
+        except Exception as e_sep_msg:
+            logger.error(f"Error sending separate copyable messages for tx {main_transaction_id}, user {user_id}: {e_sep_msg}")
 
-    # No answer_callback_query here, it was done earlier after initial validation.
+        update_user_state(user_id, 'last_bot_message_id', sent_invoice_message_id) # Main invoice ID is still the last one to track for major updates
+        update_user_state(user_id, 'current_flow', f'buy_awaiting_payment_{main_transaction_id}')
 
 
 def handle_buy_check_payment_callback(bot_instance, clear_user_state, get_user_state, update_user_state, call):
@@ -981,7 +993,7 @@ def handle_buy_check_payment_callback(bot_instance, clear_user_state, get_user_s
             updated_text_for_invoice = ""
 
             if invoice_details:
-                new_countdown_text = ""
+                new_countdown_text = "Time remaining: *Info unavailable.*\n" # Default
                 if pending_payment_latest and pending_payment_latest.get('expires_at'):
                     expires_at_val_countdown = pending_payment_latest['expires_at']
                     expires_at_dt_obj_countdown = None
@@ -990,14 +1002,16 @@ def handle_buy_check_payment_callback(bot_instance, clear_user_state, get_user_s
                         try:
                             if expires_at_val_countdown.endswith('Z'):
                                 expires_at_dt_obj_countdown = datetime.datetime.fromisoformat(expires_at_val_countdown.replace('Z', '+00:00'))
-                            else: # Try parsing as is, assuming it might be ISO without Z or with offset
+                            elif '+' in expires_at_val_countdown.split('T')[1]: # Check if timezone offset is already there
                                 expires_at_dt_obj_countdown = datetime.datetime.fromisoformat(expires_at_val_countdown)
-                        except ValueError: # Fallback for common non-ISO formats if fromisoformat fails
+                            else: # Assume naive UTC if no Z and no offset after T
+                                expires_at_dt_obj_countdown = datetime.datetime.fromisoformat(expires_at_val_countdown).replace(tzinfo=datetime.timezone.utc)
+                        except ValueError:
                             try:
-                                expires_at_dt_obj_countdown = datetime.datetime.strptime(expires_at_val_countdown, '%Y-%m-%d %H:%M:%S.%f')
+                                expires_at_dt_obj_countdown = datetime.datetime.strptime(expires_at_val_countdown, '%Y-%m-%d %H:%M:%S.%f').replace(tzinfo=datetime.timezone.utc)
                             except ValueError:
                                 try:
-                                    expires_at_dt_obj_countdown = datetime.datetime.strptime(expires_at_val_countdown, '%Y-%m-%d %H:%M:%S')
+                                    expires_at_dt_obj_countdown = datetime.datetime.strptime(expires_at_val_countdown, '%Y-%m-%d %H:%M:%S').replace(tzinfo=datetime.timezone.utc)
                                 except Exception as e_parse_cd:
                                     logger.error(f"Countdown: Unparseable expires_at string '{expires_at_val_countdown}': {e_parse_cd}")
                     elif isinstance(expires_at_val_countdown, datetime.datetime):
@@ -1013,16 +1027,13 @@ def handle_buy_check_payment_callback(bot_instance, clear_user_state, get_user_s
                         now_utc_cd = datetime.datetime.now(datetime.timezone.utc)
                         time_remaining_updated_td = expires_at_dt_obj_countdown - now_utc_cd
 
-                        if time_remaining_updated_td.total_seconds() > 0:
+                        if time_remaining_updated_td.total_seconds() > 60: # More than 1 minute
                             remaining_minutes_updated = int(time_remaining_updated_td.total_seconds() / 60)
-                            if remaining_minutes_updated > 0:
-                                new_countdown_text = f"Time remaining: *Approx. {remaining_minutes_updated} min.*\n"
-                            else:
-                                new_countdown_text = f"Time remaining: *Less than a minute.*\n"
-                        else:
+                            new_countdown_text = f"Time remaining: *Approx. {remaining_minutes_updated} min.*\n"
+                        elif time_remaining_updated_td.total_seconds() > 0: # Between 0 and 60 seconds
+                            new_countdown_text = f"Time remaining: *Less than a minute.*\n"
+                        else: # 0 or negative (window passed)
                             new_countdown_text = f"Time remaining: *Window passed.*\n"
-                    else: # expires_at_val_countdown was not parsable or None
-                        new_countdown_text = "" # Or "Time remaining: Not available\n"
 
                 updated_text_for_invoice = (
                     f"{new_status_line}\n"
@@ -1030,8 +1041,9 @@ def handle_buy_check_payment_callback(bot_instance, clear_user_state, get_user_s
                     f"Invoice for your purchase of *{invoice_details['item_name_escaped']}*:\n\n"
                     f"{invoice_details['price_info_text']}\n\n"
                     f"Payment Method: *{invoice_details['display_coin_symbol_escaped']}* ({invoice_details['network_for_db_escaped']})\n\n"
-                    f"Please send the exact amount:\n`{invoice_details['expected_crypto_amount_str']}` {invoice_details['display_coin_symbol_escaped']}\n\n"
-                    f"To this address:\n`{invoice_details['unique_address_escaped']}`\n\n"
+                    f"Amount: *{invoice_details['expected_crypto_amount_str']} {invoice_details['display_coin_symbol_escaped']}*\n"
+                    f"Address: *{invoice_details['unique_address_escaped']}*\n\n"
+                    f"_(Please copy the exact amount and address from the separate messages sent earlier.)_\n\n"
                     f"Expires At: *{invoice_details['expires_at_formatted_escaped']}*\n\n" # Static original expiry time
                     f"{invoice_details['final_sentence_escaped']}"
                 ).strip()
