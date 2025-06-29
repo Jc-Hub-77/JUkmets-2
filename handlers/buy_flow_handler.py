@@ -97,7 +97,8 @@ def handle_buy_initiate_callback(bot_instance, clear_user_state, get_user_state,
                     chat_id,
                     photo=photo_file,
                     caption=prompt_text,
-                    reply_markup=markup
+                    reply_markup=markup,
+                    parse_mode=None  # Explicitly set parse_mode
                 )
         else:
             sent_message = send_or_edit_message(
@@ -105,7 +106,8 @@ def handle_buy_initiate_callback(bot_instance, clear_user_state, get_user_state,
                 chat_id=chat_id,
                 text=prompt_text,
                 reply_markup=markup,
-                existing_message_id=existing_message_id
+                existing_message_id=existing_message_id,
+                parse_mode=None  # Explicitly set parse_mode
             )
 
         if sent_message:
@@ -745,12 +747,47 @@ def handle_pay_buy_crypto_callback(bot_instance, clear_user_state, get_user_stat
 
     price_info_text = "\n".join(price_info_parts)
 
+    # Calculate initial countdown for the first invoice display
+    # Ensure expires_at_dt is offset-aware UTC for correct comparison with aware now()
+    expires_at_dt_aware = expires_at_dt
+    if expires_at_dt_aware.tzinfo is None:
+        expires_at_dt_aware = expires_at_dt_aware.replace(tzinfo=datetime.timezone.utc)
+    else:
+        expires_at_dt_aware = expires_at_dt_aware.astimezone(datetime.timezone.utc)
+
+    now_for_countdown = datetime.datetime.now(datetime.timezone.utc)
+    initial_time_remaining_td = expires_at_dt_aware - now_for_countdown
+    initial_countdown_text = ""
+
+    if initial_time_remaining_td.total_seconds() > 0:
+        initial_remaining_minutes = int(initial_time_remaining_td.total_seconds() / 60)
+        if initial_remaining_minutes > 0:
+            initial_countdown_text = f"Time remaining: *Approx. {initial_remaining_minutes} min.*\n"
+        else: # Less than a minute but positive
+            initial_countdown_text = f"Time remaining: *Less than a minute.*\n"
+    else: # Time has already passed or is zero
+        initial_countdown_text = f"Time remaining: *Window passed.*\n"
+
+    # Store invoice components for reconstruction during updates
+    invoice_template_details = {
+        'item_name_escaped': item_name_display_escaped,
+        'price_info_text': price_info_text,
+        'display_coin_symbol_escaped': display_coin_symbol_escaped,
+        'network_for_db_escaped': network_for_db_escaped,
+        'expected_crypto_amount_str': expected_crypto_amount_str, # Raw amount for backticks
+        'unique_address_escaped': unique_address_escaped,
+        'final_sentence_escaped': final_sentence_escaped,
+        'expires_at_formatted_escaped': expires_at_formatted_escaped # Static original expiry time string
+    }
+    update_user_state(user_id, f'buy_invoice_details_{main_transaction_id}', invoice_template_details)
+
     invoice_text = (
         f"Invoice for your purchase of *{item_name_display_escaped}*:\n\n"
         f"{price_info_text}\n\n"
         f"Payment Method: *{display_coin_symbol_escaped}* ({network_for_db_escaped})\n"
-        f"Amount: *{expected_crypto_amount_str}* {display_coin_symbol_escaped}\n"
+        f"Amount: `{expected_crypto_amount_str}` *{display_coin_symbol_escaped}*\n"
         f"Address: `{unique_address_escaped}`\n\n"
+        f"{initial_countdown_text}"
         f"Expires At: *{expires_at_formatted_escaped}*\n\n"
         f"{final_sentence_escaped}"
     )
@@ -854,8 +891,8 @@ def handle_buy_check_payment_callback(bot_instance, clear_user_state, get_user_s
             logger.info(f"On-demand check for buy tx {transaction_id} (user {user_id}): newly_confirmed={newly_confirmed}, status_info='{status_info}'")
             pending_payment_latest = get_pending_payment_by_transaction_id(transaction_id) # Refresh data
 
-            current_invoice_text = call.message.caption if call.message.photo else call.message.text
-            base_invoice_text = "\n".join([line for line in (current_invoice_text or "").split('\n') if not line.strip().startswith("Status:")])
+            # current_invoice_text = call.message.caption if call.message.photo else call.message.text
+            # base_invoice_text = "\n".join([line for line in (current_invoice_text or "").split('\n') if not line.strip().startswith("Status:")])
 
             new_status_line = ""
             alert_message = ""
@@ -878,13 +915,39 @@ def handle_buy_check_payment_callback(bot_instance, clear_user_state, get_user_s
                 alert_message = f"Monitoring updated. Confirmations: {confs}."
                 show_alert_flag = False
             elif status_info == 'expired':
-                new_status_line = f"Status: This payment request has expired."
-                alert_message = "This payment request has expired."
-                new_markup = types.InlineKeyboardMarkup(row_width=1)
-                if selected_size_for_back: # If we have size, we can go back to that item's payment options
-                    new_markup.add(types.InlineKeyboardButton("⬅️ Try Different Payment Method", callback_data=f"select_size_{selected_size_for_back}"))
-                new_markup.add(types.InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_to_main"))
-                reply_markup_to_use = new_markup
+                # Inform that the original window has passed, but allow to check again.
+                # The payment_monitor.check_specific_pending_payment should still attempt a real check.
+                # If it can no longer check (e.g., blockchain API limitation for old tx), it should return a different error.
+                current_pending_payment_record = get_pending_payment_by_transaction_id(transaction_id) # Refresh data
+                expires_at_val = current_pending_payment_record.get('expires_at') if current_pending_payment_record else None
+
+                expiry_message_segment = "The original payment window has passed."
+                if expires_at_val:
+                    try:
+                        # Assuming expires_at_val is a datetime string or datetime object
+                        if isinstance(expires_at_val, str):
+                            # Attempt to parse if it's a string, common formats
+                            try:
+                                expires_at_dt_obj = datetime.datetime.fromisoformat(expires_at_val.replace('Z', '+00:00'))
+                            except ValueError: # Fallback for other potential string formats if fromisoformat fails
+                                expires_at_dt_obj = datetime.datetime.strptime(expires_at_val, '%Y-%m-%d %H:%M:%S.%f%z') # Example with timezone
+                            except: # Catch any parsing error
+                                expires_at_dt_obj = None
+                        elif isinstance(expires_at_val, datetime.datetime):
+                            expires_at_dt_obj = expires_at_val
+                        else:
+                            expires_at_dt_obj = None
+
+                        if expires_at_dt_obj:
+                            expiry_message_segment = f"The original payment window (until {escape_md(expires_at_dt_obj.strftime('%Y-%m-%d %H:%M:%S UTC'))}) has passed."
+                    except Exception as e_exp_fmt:
+                        logger.warning(f"Could not format expires_at from DB value '{expires_at_val}': {e_exp_fmt}")
+                        # expiry_message_segment remains default
+
+                new_status_line = f"Status: {escape_md(expiry_message_segment)} No payment confirmed yet."
+                alert_message = f"{expiry_message_segment} No payment has been confirmed. You can try checking again."
+                show_alert_flag = True # Make it an alert
+                reply_markup_to_use = call.message.reply_markup # Keep original buttons to allow re-checking
             elif status_info == 'error_api':
                 new_status_line = f"Status: Could not check status due to a temporary API error. Please try again in a moment."
                 alert_message = "Could not check status due to an API error. Please try again."
@@ -902,7 +965,73 @@ def handle_buy_check_payment_callback(bot_instance, clear_user_state, get_user_s
                 if status_info != 'monitoring': # Non-monitoring, non-expired usually means terminal or error
                      reply_markup_to_use = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("⬅️ Back to Main Menu", callback_data="back_to_main"))
 
-            updated_text_for_invoice = f"{new_status_line}\n\n{base_invoice_text}".strip()
+            # Updated invoice text construction
+            invoice_details = get_user_state(user_id, f'buy_invoice_details_{transaction_id}')
+            updated_text_for_invoice = ""
+
+            if invoice_details:
+                new_countdown_text = ""
+                if pending_payment_latest and pending_payment_latest.get('expires_at'):
+                    expires_at_val_countdown = pending_payment_latest['expires_at']
+                    expires_at_dt_obj_countdown = None
+                    # Robust parsing of expires_at_val_countdown
+                    if isinstance(expires_at_val_countdown, str):
+                        try:
+                            if expires_at_val_countdown.endswith('Z'):
+                                expires_at_dt_obj_countdown = datetime.datetime.fromisoformat(expires_at_val_countdown.replace('Z', '+00:00'))
+                            else: # Try parsing as is, assuming it might be ISO without Z or with offset
+                                expires_at_dt_obj_countdown = datetime.datetime.fromisoformat(expires_at_val_countdown)
+                        except ValueError: # Fallback for common non-ISO formats if fromisoformat fails
+                            try:
+                                expires_at_dt_obj_countdown = datetime.datetime.strptime(expires_at_val_countdown, '%Y-%m-%d %H:%M:%S.%f')
+                            except ValueError:
+                                try:
+                                    expires_at_dt_obj_countdown = datetime.datetime.strptime(expires_at_val_countdown, '%Y-%m-%d %H:%M:%S')
+                                except Exception as e_parse_cd:
+                                    logger.error(f"Countdown: Unparseable expires_at string '{expires_at_val_countdown}': {e_parse_cd}")
+                    elif isinstance(expires_at_val_countdown, datetime.datetime):
+                        expires_at_dt_obj_countdown = expires_at_val_countdown
+
+                    if expires_at_dt_obj_countdown:
+                        # Ensure offset-aware UTC for comparison
+                        if expires_at_dt_obj_countdown.tzinfo is None:
+                            expires_at_dt_obj_countdown = expires_at_dt_obj_countdown.replace(tzinfo=datetime.timezone.utc)
+                        else:
+                            expires_at_dt_obj_countdown = expires_at_dt_obj_countdown.astimezone(datetime.timezone.utc)
+
+                        now_utc_cd = datetime.datetime.now(datetime.timezone.utc)
+                        time_remaining_updated_td = expires_at_dt_obj_countdown - now_utc_cd
+
+                        if time_remaining_updated_td.total_seconds() > 0:
+                            remaining_minutes_updated = int(time_remaining_updated_td.total_seconds() / 60)
+                            if remaining_minutes_updated > 0:
+                                new_countdown_text = f"Time remaining: *Approx. {remaining_minutes_updated} min.*\n"
+                            else:
+                                new_countdown_text = f"Time remaining: *Less than a minute.*\n"
+                        else:
+                            new_countdown_text = f"Time remaining: *Window passed.*\n"
+                    else: # expires_at_val_countdown was not parsable or None
+                        new_countdown_text = "" # Or "Time remaining: Not available\n"
+
+                updated_text_for_invoice = (
+                    f"{new_status_line}\n"
+                    f"{new_countdown_text}"
+                    f"Invoice for your purchase of *{invoice_details['item_name_escaped']}*:\n\n"
+                    f"{invoice_details['price_info_text']}\n\n"
+                    f"Payment Method: *{invoice_details['display_coin_symbol_escaped']}* ({invoice_details['network_for_db_escaped']})\n"
+                    f"Amount: `{invoice_details['expected_crypto_amount_str']}` *{invoice_details['display_coin_symbol_escaped']}*\n"
+                    f"Address: `{invoice_details['unique_address_escaped']}`\n\n"
+                    f"Expires At: *{invoice_details['expires_at_formatted_escaped']}*\n\n" # Static original expiry time
+                    f"{invoice_details['final_sentence_escaped']}"
+                ).strip()
+            else: # Fallback if invoice_details not in user_state
+                logger.warning(f"User state 'buy_invoice_details_{transaction_id}' not found for user {user_id}. Invoice text might be basic.")
+                # Fallback to simpler update (as was before this change for countdown)
+                current_invoice_text_fb = call.message.caption if call.message.photo else call.message.text
+                base_invoice_text_fb = "\n".join([line for line in (current_invoice_text_fb or "").split('\n') if not line.strip().startswith("Status:")])
+                updated_text_for_invoice = f"{new_status_line}\n\n{base_invoice_text_fb}".strip()
+
+
             if len(updated_text_for_invoice) > (1024 if call.message.photo else 4096): # Truncate
                 updated_text_for_invoice = updated_text_for_invoice[:(1021 if call.message.photo else 4093)] + "..."
 
