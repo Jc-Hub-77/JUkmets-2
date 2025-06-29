@@ -1,0 +1,5 @@
+pyTelegramBotAPI
+qrcode[pil]
+requests
+bip_utils
+mnemonic
